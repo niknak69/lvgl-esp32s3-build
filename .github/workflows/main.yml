@@ -1,0 +1,36 @@
+name: Build lvgl_micropython for ESP32-S3
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: lvgl-micropython/lvgl_micropython
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y python3 python3-pip git cmake ninja-build flex bison gperf ccache \
+            libffi-dev libssl-dev dfu-util wget curl xz-utils gawk make libncurses-dev libusb-1.0-0 unzip
+
+      - name: Install ESP-IDF
+        run: |
+          git clone -b v5.2.1 --recursive https://github.com/espressif/esp-idf.git ~/esp-idf
+          ~/esp-idf/install.sh esp32,esp32s3
+
+      - name: Build firmware
+        shell: bash
+        run: |
+          source ~/esp-idf/export.sh
+          python3 make.py esp32 BOARD=ESP32_GENERIC_S3
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: ports/esp32/build-ESP32_GENERIC_S3/firmware.bin
