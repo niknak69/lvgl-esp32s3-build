@@ -1,0 +1,94 @@
+name: Build LVGL MicroPython for ESP32-S3 (SPIRAM_OCT)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout lvgl_micropython + submodules
+        uses: actions/checkout@v4
+        with:
+          repository: lvgl-micropython/lvgl_micropython
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git python3 python3-pip python3-venv cmake ninja-build \
+            flex bison gperf ccache libffi-dev libssl-dev dfu-util wget curl xz-utils gawk \
+            build-essential libncurses-dev libusb-1.0-0 unzip
+
+      - name: Install ESP-IDF v5.4 locally
+        run: |
+          git clone -b v5.4 --recursive https://github.com/espressif/esp-idf.git $GITHUB_WORKSPACE/esp-idf
+          $GITHUB_WORKSPACE/esp-idf/install.sh esp32,esp32s3
+
+      # Fix the IDF venv to the click version it expects (<8.2) BEFORE export
+      - name: Pin click in IDF venv
+        shell: bash
+        run: |
+          set -eux
+          VENV="$HOME/.espressif/python_env/idf5.4_py3.10_env"
+          "$VENV/bin/python" -m pip install --upgrade "pip<24.3"
+          "$VENV/bin/python" -m pip install --force-reinstall "click<8.2,>=7.0"
+
+      - name: Export ESP-IDF env
+        shell: bash
+        run: |
+          set -eux
+          source "$GITHUB_WORKSPACE/esp-idf/export.sh"
+          idf.py --version
+          echo "ESP_PYTHON=${ESP_PYTHON:-unset}"
+
+      # Build with the project's make.py so LVGL + lcd_bus get compiled in
+      - name: Build lvgl_micropython (ESP32_GENERIC_S3 + SPIRAM_OCT)
+        shell: bash
+        run: |
+          set -eux
+          source "$GITHUB_WORKSPACE/esp-idf/export.sh"
+          # Make sure the builder uses the IDF venv python:
+          export ESP_PYTHON="$HOME/.espressif/python_env/idf5.4_py3.10_env/bin/python"
+          # Minimal, working config for your board (RGB panel + GT911 touch)
+          python3 make.py esp32 \
+            BOARD=ESP32_GENERIC_S3 \
+            BOARD_VARIANT=SPIRAM_OCT \
+            DISPLAY=rgb_display \
+            INDEV=gt911 \
+            --flash-size=8
+          # Show where the final bin landed
+          find ports/esp32 -type f -name "firmware*.bin" -print || true
+          find ports/esp32 -type f -name "micropython.bin" -print || true
+
+      - name: Locate firmware.bin
+        id: locate
+        shell: bash
+        run: |
+          set -eux
+          # Prefer the single-file 'firmware.bin' if present; fall back to micropython.bin
+          FW=$(find ports/esp32 -type f -name "firmware*.bin" | head -n1 || true)
+          if [ -z "$FW" ]; then
+            FW=$(find ports/esp32 -type f -name "micropython.bin" | head -n1 || true)
+          fi
+          test -n "$FW" || (echo "No firmware binary found" && exit 1)
+          echo "firmware=$FW" >> "$GITHUB_OUTPUT"
+          echo "Found: $FW"
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: ${{ steps.locate.outputs.firmware }}
+
+      - name: Upload build outputs (optional, for 3-file flashing)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-outputs
+          path: |
+            ports/esp32/build-*/bootloader/*
+            ports/esp32/build-*/partition_table/*
+            ports/esp32/build-*/flash_args
