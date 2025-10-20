@@ -1,0 +1,98 @@
+name: Build LVGL MicroPython for ESP32-S3 (SPIRAM_OCT)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout lvgl_micropython + submodules
+        uses: actions/checkout@v4
+        with:
+          repository: lvgl-micropython/lvgl_micropython
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git python3 python3-pip python3-venv cmake ninja-build \
+            flex bison gperf ccache libffi-dev libssl-dev dfu-util wget curl xz-utils gawk \
+            build-essential libncurses-dev libusb-1.0-0 unzip
+
+      # IMPORTANT: use the repo's own ESP-IDF under lib/esp-idf (not a container, not a global IDF)
+      - name: Install repo ESP-IDF tools
+        shell: bash
+        run: |
+          set -eux
+          unset IDF_PYTHON_ENV_PATH || true
+          ./lib/esp-idf/install.sh esp32,esp32s3
+
+      # Pin click inside THAT venv before export (IDF 5.4 needs <8.2)
+      - name: Pin click in repo IDF venv
+        shell: bash
+        run: |
+          set -eux
+          VENV="$HOME/.espressif/python_env/idf5.4_py3.10_env"
+          "$VENV"/bin/python -m pip install --upgrade "pip<24.3"
+          "$VENV"/bin/python -m pip install --force-reinstall "click<8.2,>=7.0"
+
+      - name: Export repo ESP-IDF env
+        shell: bash
+        run: |
+          set -eux
+          source ./lib/esp-idf/export.sh
+          idf.py --version
+          which python3
+
+      # Build with this fork's make.py flags so LVGL + lcd_bus are included
+      - name: Build lvgl firmware (ESP32_GENERIC_S3 + SPIRAM_OCT + rgb_display + gt911)
+        shell: bash
+        run: |
+          set -eux
+          source ./lib/esp-idf/export.sh
+          # build mpy-cross + fetch submodules (fork-specific flags)
+          python3 make.py esp32 -mpy_cross -submodules
+          # build the firmware
+          python3 make.py esp32 \
+            BOARD=ESP32_GENERIC_S3 \
+            BOARD_VARIANT=SPIRAM_OCT \
+            DISPLAY=rgb_display \
+            INDEV=gt911 \
+            --flash-size=8
+          echo "Searching for outputs..."
+          find lib/micropython/ports/esp32 -type f -name "firmware*.bin" -print || true
+          find lib/micropython/ports/esp32 -type f -name "micropython.bin" -print || true
+          find lib/micropython/ports/esp32 -type f -name "flash_args" -print || true
+
+      - name: Locate firmware (handles fork's lib/micropython layout)
+        id: locate
+        shell: bash
+        run: |
+          set -eux
+          FW=$(find lib/micropython/ports/esp32 -type f -name "firmware*.bin" | head -n1 || true)
+          if [ -z "$FW" ]; then
+            FW=$(find lib/micropython/ports/esp32 -type f -name "micropython.bin" | head -n1 || true)
+          fi
+          test -n "$FW" || (echo "No firmware binary found" && exit 1)
+          echo "firmware=$FW" >> "$GITHUB_OUTPUT"
+          echo "Found: $FW"
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: ${{ steps.locate.outputs.firmware }}
+
+      - name: Upload build outputs (for 3-file flash / debug)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-outputs
+          path: |
+            lib/micropython/ports/esp32/build-*/bootloader/*
+            lib/micropython/ports/esp32/build-*/partition_table/*
+            lib/micropython/ports/esp32/build-*/flash_args
+            lib/micropython/ports/esp32/build-*
